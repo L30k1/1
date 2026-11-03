@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, useState } from "react";
+import { ChangeEvent, useCallback, useEffect, useState } from "react";
 
 const MAX_SINGLE_PUT_BYTES = 5 * 1024 ** 3; // Límite de S3 para un solo PUT: 5 GB
 
@@ -10,6 +10,17 @@ type Status =
   | { kind: "uploading"; percent: number }
   | { kind: "done"; key: string; seconds: number; mbPerSecond: number }
   | { kind: "error"; message: string };
+
+type StoredFile = { key: string; name: string; size: number; lastModified: string | null };
+
+type Library =
+  | { kind: "loading" }
+  | { kind: "ready"; files: StoredFile[]; truncated: boolean }
+  | { kind: "error"; message: string };
+
+function formatSize(bytes: number) {
+  return bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(2)} GB` : `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+}
 
 function putToS3(url: string, file: File, contentType: string, onProgress: (percent: number) => void) {
   // XMLHttpRequest en vez de fetch porque fetch no reporta progreso de subida.
@@ -33,7 +44,24 @@ function putToS3(url: string, file: File, contentType: string, onProgress: (perc
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [status, setStatus] = useState<Status>({ kind: "idle" });
+  const [library, setLibrary] = useState<Library>({ kind: "loading" });
   const busy = status.kind === "signing" || status.kind === "uploading";
+
+  const loadFiles = useCallback(async () => {
+    setLibrary({ kind: "loading" });
+    try {
+      const response = await fetch("/api/files", { cache: "no-store" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error ?? `La API respondió ${response.status}`);
+      setLibrary({ kind: "ready", files: data.files, truncated: data.truncated });
+    } catch (error) {
+      setLibrary({ kind: "error", message: error instanceof Error ? error.message : "Error desconocido" });
+    }
+  }, []);
+
+  useEffect(() => {
+    loadFiles();
+  }, [loadFiles]);
 
   function onFileChange(event: ChangeEvent<HTMLInputElement>) {
     setFile(event.target.files?.[0] ?? null);
@@ -65,6 +93,7 @@ export default function Home() {
 
       const seconds = (performance.now() - startedAt) / 1000;
       setStatus({ kind: "done", key: data.key, seconds, mbPerSecond: file.size / 1024 ** 2 / seconds });
+      loadFiles();
     } catch (error) {
       setStatus({ kind: "error", message: error instanceof Error ? error.message : "Error desconocido" });
     }
@@ -102,6 +131,44 @@ export default function Home() {
         )}
         {status.kind === "error" && <p style={{ color: "#f85149", overflowWrap: "anywhere" }}>{status.message}</p>}
       </div>
+
+      <section style={{ marginTop: 48 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 16 }}>
+          <h2 style={{ margin: 0 }}>Archivos en S3</h2>
+          <button onClick={loadFiles} disabled={library.kind === "loading"} style={{ padding: "6px 12px" }}>
+            Actualizar
+          </button>
+        </div>
+
+        {library.kind === "loading" && <p>Cargando...</p>}
+        {library.kind === "error" && <p style={{ color: "#f85149", overflowWrap: "anywhere" }}>{library.message}</p>}
+        {library.kind === "ready" && library.files.length === 0 && <p>Todavía no hay archivos.</p>}
+        {library.kind === "ready" && library.files.length > 0 && (
+          <ul style={{ listStyle: "none", padding: 0 }}>
+            {library.files.map((stored) => {
+              const href = `/api/files/open?key=${encodeURIComponent(stored.key)}`;
+              return (
+                <li key={stored.key} style={{ padding: "12px 0", borderBottom: "1px solid #30363d" }}>
+                  <div style={{ overflowWrap: "anywhere" }}>{stored.name}</div>
+                  <div style={{ color: "#9da7b3", fontSize: 14, margin: "4px 0" }}>
+                    {formatSize(stored.size)}
+                    {stored.lastModified && ` · ${new Date(stored.lastModified).toLocaleString("es-MX")}`}
+                  </div>
+                  <a href={href} target="_blank" rel="noopener noreferrer" style={{ color: "#58a6ff", marginRight: 16 }}>
+                    Abrir
+                  </a>
+                  <a href={`${href}&download=1`} style={{ color: "#58a6ff" }}>
+                    Descargar
+                  </a>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+        {library.kind === "ready" && library.truncated && (
+          <p style={{ color: "#9da7b3" }}>Se muestran solo los primeros 100 archivos.</p>
+        )}
+      </section>
     </main>
   );
 }
